@@ -1,0 +1,24 @@
+name: GitHub Trending 日报
+on:
+  schedule:
+    # 每天北京时间 8:00 (UTC 0:00) 推送
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+
+jobs:
+  trending:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 爬取 + LLM 翻译 + 推送 GitHub 热榜
+        run: python scripts/trending.py
+        env:
+          FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
+          FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+          FEISHU_CHAT_ID: ${{ secrets.FEISHU_CHAT_ID }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
