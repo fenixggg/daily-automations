@@ -1,4 +1,4 @@
-name: GitHub Trending 日报
+name: GitHub AI 项目热榜
 on:
   schedule:
     # 每天北京时间 8:00 (UTC 0:00) 推送
@@ -15,10 +15,16 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: 爬取 + LLM 翻译 + 推送 GitHub 热榜
+      - name: 爬取 + LLM 分析 + 推送 GitHub AI 项目热榜
         run: python scripts/trending.py
         env:
+          # 飞书推送
           FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
           FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
           FEISHU_CHAT_ID: ${{ secrets.FEISHU_CHAT_ID }}
+          # LLM（任选一组即可）
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
+          LLM_MODEL: ${{ secrets.LLM_MODEL }}
+          # Google Gemini（备用）
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}

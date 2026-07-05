@@ -1,17 +1,22 @@
 #!/usr/bin/env python3
 """
-GitHub Trending 日报 - 爬取热门项目，Gemini 翻译/分类/解读，推送到飞书群
+GitHub AI 项目热榜 - 爬取热门项目，LLM 翻译/分类/解读，推送到飞书群
 
 用法：
   python scripts/trending.py
 
-环境变量：
-  FEISHU_APP_ID      飞书自建应用 App ID
-  FEISHU_APP_SECRET  飞书自建应用 App Secret
-  FEISHU_CHAT_ID     飞书目标群聊 ID（oc_xxx）
-  GEMINI_API_KEY     Google Gemini API Key（免费，1500 次/天）
+环境变量（LLM 二选一）：
+  方式 A - OpenAI 兼容接口（推荐）：
+    LLM_API_KEY     API Key
+    LLM_BASE_URL    API 地址，如 https://api.mimo.xiaomi.com/v1
+    LLM_MODEL       模型名，如 miMo-XX
+  方式 B - Google Gemini（备用）：
+    GEMINI_API_KEY  Google Gemini API Key
 
-依赖：无（仅使用 Python 标准库 + Gemini REST API）
+  飞书推送（必填）：
+    FEISHU_APP_ID, FEISHU_APP_SECRET, FEISHU_CHAT_ID
+
+依赖：无（仅使用 Python 标准库）
 """
 
 import os
@@ -27,12 +32,21 @@ from datetime import datetime
 FEISHU_APP_ID = os.environ.get('FEISHU_APP_ID')
 FEISHU_APP_SECRET = os.environ.get('FEISHU_APP_SECRET')
 FEISHU_CHAT_ID = os.environ.get('FEISHU_CHAT_ID')
+
+# LLM 配置：优先用 OpenAI 兼容接口，回退到 Gemini
+LLM_API_KEY = os.environ.get('LLM_API_KEY')
+LLM_BASE_URL = os.environ.get('LLM_BASE_URL', '').rstrip('/')
+LLM_MODEL = os.environ.get('LLM_MODEL', '')
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
 
 # 爬取页面前 N 条（需要多爬一些，因为后面会过滤掉非 AI 项目）
 SCRAPE_COUNT = 25
 # 最终推送条数上限
 MAX_RESULTS = 10
+
+# 消息底部署名
+MODEL_SIGNATURE = "Powered by WorkBuddy / DeepSeek-V4-Flash"
+
 
 # ========== 通用 HTTP 工具 ==========
 
@@ -73,7 +87,6 @@ def get_trending():
     articles = page.split('<article class="Box-row')
 
     for article in articles[1:]:
-        # 提取仓库路径
         href_match = re.search(
             r'<h2[^>]*>.*?<a[^>]*href="(/[^"]+)"', article, re.DOTALL
         )
@@ -85,7 +98,6 @@ def get_trending():
             continue
         repo_path = href_match.group(1).strip().lstrip("/")
 
-        # 描述
         desc_match = re.search(
             r'<p class="col-9[^"]*"[^>]*>(.*?)</p>', article, re.DOTALL
         )
@@ -94,13 +106,11 @@ def get_trending():
             raw = re.sub(r'<[^>]+>', '', desc_match.group(1))
             description = html_mod.unescape(raw).strip()
 
-        # 编程语言
         lang_match = re.search(
             r'itemprop="programmingLanguage">(.*?)</span>', article
         )
         language = lang_match.group(1).strip() if lang_match else ""
 
-        # 本周新增 Star
         stars_match = re.search(r'([\d,]+)\s*stars?\s*(today|this\s*week)', article)
         if not stars_match:
             stars_match = re.search(r'([\d,]+)\s*stars?\b', article)
@@ -124,33 +134,9 @@ def get_trending():
     return repos
 
 
-# ========== Gemini LLM 调用 ==========
+# ========== LLM 调用（通用） ==========
 
-def gemini_analyze(repos):
-    """
-    批量调用 Gemini，对每个项目进行：
-      - 中文翻译
-      - 分类标签
-      - 一句中文解读
-    返回 list[dict]，每个 dict 追加：translation, category, interpretation
-    """
-    api_key = GEMINI_API_KEY
-    if not api_key:
-        print("  ⚠️ 未配置 GEMINI_API_KEY，跳过 LLM 分析，使用原始英文描述")
-        for r in repos:
-            r['translation'] = r['description']
-            r['category'] = ''
-            r['interpretation'] = ''
-        return repos
-
-    # 构建 Prompt
-    lines = []
-    for i, r in enumerate(repos, 1):
-        lang_info = f"  Language: {r['language']}" if r['language'] else ""
-        desc = r['description'][:200] if r['description'] else "(no description)"
-        lines.append(f"{i}. Repo: {r['repo']}\n   Description: {desc}{lang_info}")
-
-    prompt = f"""你是一个 GitHub Trending 分析助手。请分析以下 {len(repos)} 个热门开源项目。
+BUILD_PROMPT = """你是一个 GitHub Trending 分析助手。请分析以下 {count} 个热门开源项目。
 
 对每个项目返回：
 1. translation: 项目描述的简短中文翻译（1-2句话）
@@ -166,62 +152,129 @@ def gemini_analyze(repos):
 ]
 
 项目列表：
-{chr(10).join(lines)}"""
+{items}"""
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
+
+def build_prompt(repos):
+    """构建 LLM prompt"""
+    lines = []
+    for i, r in enumerate(repos, 1):
+        lang_info = f"  Language: {r['language']}" if r['language'] else ""
+        desc = r['description'][:200] if r['description'] else "(no description)"
+        lines.append(f"{i}. Repo: {r['repo']}\n   Description: {desc}{lang_info}")
+    return BUILD_PROMPT.format(
+        count=len(repos),
+        items="\n".join(lines)
+    )
+
+
+def parse_llm_response(text, repos):
+    """从 LLM 响应文本中解析 JSON 并合并到 repos"""
+    json_match = re.search(r'```(?:json)?\s*(\[.*?\])\s*```', text, re.DOTALL)
+    if json_match:
+        text = json_match.group(1)
+    text = text.strip()
+    analysis = json.loads(text)
+
+    for item in analysis:
+        rank = item.get('rank', 0)
+        if 1 <= rank <= len(repos):
+            idx = rank - 1
+            repos[idx]['translation'] = item.get('translation', repos[idx]['description'])
+            repos[idx]['category'] = item.get('category', '')
+            repos[idx]['interpretation'] = item.get('interpretation', '')
+    return repos
+
+
+def llm_analyze(repos):
+    """
+    调用 LLM（优先 OpenAI 兼容接口，回退 Gemini）对每个项目进行：
+      - 中文翻译
+      - 分类标签
+      - 一句中文解读
+    """
+    prompt = build_prompt(repos)
+
+    if LLM_API_KEY and LLM_BASE_URL and LLM_MODEL:
+        return _call_openai_compat(repos, prompt)
+    elif GEMINI_API_KEY:
+        return _call_gemini(repos, prompt)
+    else:
+        print("  ⚠️ 未配置 LLM（需 LLM_API_KEY/BASE_URL/MODEL 或 GEMINI_API_KEY）")
+        print("  ⚠️ 降级使用原始英文描述")
+        return _fallback(repos)
+
+
+def _call_openai_compat(repos, prompt):
+    """通过 OpenAI 兼容接口调用 LLM"""
+    url = f"{LLM_BASE_URL}/chat/completions"
+    body = json.dumps({
+        "model": LLM_MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.3,
+        "max_tokens": 2048,
+    }).encode("utf-8")
+    headers = {
+        "Authorization": f"Bearer {LLM_API_KEY}",
+        "Content-Type": "application/json; charset=utf-8",
+    }
+
+    print(f"  → 调用 OpenAI 兼容接口 ({LLM_BASE_URL}) ...")
+    resp_body, code = http_request(url, data=body, headers=headers, timeout=120)
+
+    if code != 200:
+        print(f"  ❌ LLM API 返回 HTTP {code}: {(resp_body or b'')[:200]}")
+        return _fallback(repos)
+
+    try:
+        result = json.loads(resp_body.decode("utf-8"))
+        text = result.get('choices', [{}])[0].get('message', {}).get('content', '')
+        if not text:
+            raise ValueError("响应中无 content")
+        repos = parse_llm_response(text, repos)
+        print(f"  ✅ OpenAI 兼容接口分析完成")
+    except Exception as e:
+        print(f"  ⚠️ LLM 解析失败: {e}")
+        return _fallback(repos)
+
+    return repos
+
+
+def _call_gemini(repos, prompt):
+    """调用 Google Gemini API"""
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
     body = json.dumps({
         "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {
-            "temperature": 0.3,
-            "maxOutputTokens": 2048,
-        }
+        "generationConfig": {"temperature": 0.3, "maxOutputTokens": 2048},
     }).encode("utf-8")
 
-    print("  → 调用 Gemini 分析翻译...")
+    print("  → 调用 Gemini API ...")
     resp_body, code = http_request(url, data=body, timeout=60)
 
     if code != 200:
-        print(f"  ❌ Gemini API 返回 HTTP {code}: {resp_body[:200] if resp_body else '空响应'}")
-        print("  ⚠️ 降级使用原始英文描述")
-        for r in repos:
-            r['translation'] = r['description']
-            r['category'] = ''
-            r['interpretation'] = ''
-        return repos
+        print(f"  ❌ Gemini API 返回 HTTP {code}: {(resp_body or b'')[:200]}")
+        return _fallback(repos)
 
     try:
         result = json.loads(resp_body.decode("utf-8"))
         text = result.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text', '')
-
-        # 解析 JSON
-        # 有时 Gemini 在 JSON 外面包了 ```json ... ```
-        json_match = re.search(r'```(?:json)?\s*(\[.*?\])\s*```', text, re.DOTALL)
-        if json_match:
-            text = json_match.group(1)
-        text = text.strip()
-        if text.startswith('[') and text.endswith(']'):
-            analysis = json.loads(text)
-        else:
-            raise ValueError(f"无法解析 Gemini 输出: {text[:200]}")
-
-        # 合并回 repos
-        for item in analysis:
-            rank = item.get('rank', 0)
-            if 1 <= rank <= len(repos):
-                idx = rank - 1
-                repos[idx]['translation'] = item.get('translation', repos[idx]['description'])
-                repos[idx]['category'] = item.get('category', '')
-                repos[idx]['interpretation'] = item.get('interpretation', '')
-
+        if not text:
+            raise ValueError("响应中无 text")
+        repos = parse_llm_response(text, repos)
         print(f"  ✅ Gemini 分析完成")
     except Exception as e:
         print(f"  ⚠️ Gemini 解析失败: {e}")
-        print("  ⚠️ 降级使用原始英文描述")
-        for r in repos:
-            r['translation'] = r['description']
-            r['category'] = ''
-            r['interpretation'] = ''
+        return _fallback(repos)
 
+    return repos
+
+
+def _fallback(repos):
+    """LLM 不可用时降级处理"""
+    for r in repos:
+        r['translation'] = r['description']
+        r['category'] = ''
+        r['interpretation'] = ''
     return repos
 
 
@@ -264,17 +317,14 @@ def send_feishu_message(token, title, post_content):
 # ========== 消息排版 ==========
 
 def build_post_content(repos):
-    """构建飞书 post 消息，格式参考 GitHub 热榜"""
+    """构建飞书 post 消息"""
     lines = []
 
-    # 顶部标题行
     lines.append([
-        {"tag": "text", "text": f"⭐ GitHub 热门开源项目（近 7 天新增 Star 排行）\n"
-                                 f"共 {len(repos)} 个项目  |  "
-                                 f"数据来源: GitHub Trending\n"}
+        {"tag": "text", "text": f"⭐ GitHub AI 项目热榜（近 7 天新增 Star 排行）\n"
+                                 f"共 {len(repos)} 个项目  |  数据来源: GitHub Trending\n"}
     ])
 
-    # 统计热门分类
     cats = {}
     for r in repos:
         c = r.get('category', '') or '通用'
@@ -285,38 +335,29 @@ def build_post_content(repos):
         lang_info = r['language'] if r['language'] else "多语言"
         stars_str = f"{r['stars_week']:,}" if r['stars_week'] > 0 else "N/A"
 
-        # 第1行：序号 + 仓库名(链接) + 分类标签
         lines.append([
             {"tag": "text", "text": f"\n{i}."},
             {"tag": "a", "text": r['repo'], "href": r['url']},
             {"tag": "text", "text": cat_tag},
         ])
-
-        # 第2行：🔧 技术栈
         lines.append([
             {"tag": "text", "text": f"🔧 技术栈: {lang_info}"},
         ])
-
-        # 第3行：⭐ Stars
         lines.append([
             {"tag": "text", "text": f"⭐ Stars: {stars_str}（近 7 天新增）"},
         ])
 
-        # 第4行：💡 简介（已翻译）
         translation = r.get('translation', '') or r['description']
         if translation:
             lines.append([
                 {"tag": "text", "text": f"💡 简介: {translation[:150]}{'...' if len(translation) > 150 else ''}"},
             ])
-
-        # 第5行：📝 解读
         interp = r.get('interpretation', '')
         if interp:
             lines.append([
                 {"tag": "text", "text": f"📝 解读: {interp}"},
             ])
 
-    # 底部汇总
     cat_summary = "、".join(f"{k}({v})" for k, v in
                            sorted(cats.items(), key=lambda x: -x[1]))
     now = datetime.now().strftime('%Y-%m-%d %H:%M')
@@ -324,12 +365,10 @@ def build_post_content(repos):
         {"tag": "text", "text": f"\n📊 热门领域: {cat_summary}"}
     ])
     lines.append([
-        {"tag": "text", "text": f"总项目数: {len(repos)}  "
-                                 f"|  生成时间: {now}  "
-                                 f"|  Gemini AI 翻译/解读"}
+        {"tag": "text", "text": f"总项目数: {len(repos)}  |  生成时间: {now}  |  AI 分析"}
     ])
     lines.append([
-        {"tag": "text", "text": f"Powered by WorkBuddy / DeepSeek-V4-Flash"}
+        {"tag": "text", "text": f"{MODEL_SIGNATURE}"}
     ])
 
     return lines
@@ -339,17 +378,17 @@ def build_post_content(repos):
 
 def main():
     print("=" * 50)
-    print("⭐ GitHub 热榜 — 日报生成器")
+    print("⭐ GitHub AI 项目热榜 — 日报生成器")
     print("=" * 50)
 
-    # 1. 检查环境变量
+    # 1. 检查飞书环境变量
     missing = [k for k, v in [
         ("FEISHU_APP_ID", FEISHU_APP_ID),
         ("FEISHU_APP_SECRET", FEISHU_APP_SECRET),
         ("FEISHU_CHAT_ID", FEISHU_CHAT_ID),
     ] if not v]
     if missing:
-        print(f"❌ 缺少环境变量: {', '.join(missing)}")
+        print(f"❌ 缺少飞书环境变量: {', '.join(missing)}")
         sys.exit(1)
 
     # 2. 爬取 Trending
@@ -359,9 +398,9 @@ def main():
         print("  ⚠️ 没有抓到数据，跳过推送")
         return
 
-    # 3. Gemini 分析（翻译 + 分类 + 解读）
-    print("\n🤖 调用 Gemini 分析...")
-    repos = gemini_analyze(repos)
+    # 3. LLM 分析
+    print("\n🤖 调用 LLM 分析...")
+    repos = llm_analyze(repos)
 
     # 4. 过滤：只保留 AI 相关项目
     ai_categories = {'AI Agent', 'AI 开发工具', 'AI 编程助手', 'AI 应用', 'AI 多模态', 'AI 大模型'}
