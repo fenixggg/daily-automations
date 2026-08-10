@@ -7,6 +7,7 @@
 | 脚本 | 定时 | 说明 |
 |------|------|------|
 | `scripts/trending.py` | 每天 8:00 | GitHub AI 项目热榜（零依赖，LLM 翻译/分类/解读） |
+| `scripts/wb-checkin/checkin.py` | 每天 3:00 | WorkBuddy 多账号自动签到 + 活跃消息（4 账号轮询，纯标准库） |
 
 ## 配置 Secrets
 
@@ -19,6 +20,12 @@
 | `FEISHU_APP_ID` | 飞书自建应用 App ID |
 | `FEISHU_APP_SECRET` | 飞书自建应用 App Secret |
 | `FEISHU_CHAT_ID` | 飞书目标群聊 ID（以 `oc_` 开头） |
+
+### WorkBuddy 签到（wb-checkin 专用）
+
+| Secret | 说明 |
+|--------|------|
+| `WORKBUDDY_ACCESS_TOKENS` | 必填。JSON 数组：`[{"name":"号1","access_token":"eyJ...","domain":"www.codebuddy.cn"},...]` |
 
 ### LLM（二选一）
 

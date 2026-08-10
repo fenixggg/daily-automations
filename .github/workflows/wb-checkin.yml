@@ -1,0 +1,39 @@
+name: WorkBuddy 自动签到
+
+on:
+  schedule:
+    # 每天北京时间 03:00 = UTC 19:00 (前一天)
+    - cron: '0 19 * * *'
+  workflow_dispatch: {}   # 支持手动触发测试
+
+concurrency:
+  group: wb-checkin
+  cancel-in-progress: false
+
+jobs:
+  checkin:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Run checkin
+        env:
+          # 账号配置: JSON 数组, 从仓库 Settings → Secrets → Actions 配置
+          WORKBUDDY_ACCESS_TOKENS: ${{ secrets.WORKBUDDY_ACCESS_TOKENS }}
+          # 通知(可选): 飞书应用机器人 — 复用 daily-automations 现有 Secret
+          FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
+          FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+          FEISHU_CHAT_ID: ${{ secrets.FEISHU_CHAT_ID }}
+          # 通知(可选): 飞书 Webhook / Server酱, 与上面二选一或同时
+          FEISHU_WEBHOOK: ${{ secrets.FEISHU_WEBHOOK }}
+          SCKEY: ${{ secrets.SCKEY }}
+          # 每日活跃消息 (可选, 默认 "你好呀 我来了")
+          MESSAGE_TEXT: ${{ secrets.MESSAGE_TEXT }}
+        run: python scripts/wb-checkin/checkin.py

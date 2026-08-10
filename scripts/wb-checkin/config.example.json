@@ -1,0 +1,15 @@
+{
+  "_comment": "配置示例。复制为 config.json 填入真实 token 用于本地测试。生产环境请用 GitHub Secrets 的 WORKBUDDY_ACCESS_TOKENS 环境变量, 不要把真实 token 提交到仓库!",
+  "accounts": [
+    {
+      "name": "账号1",
+      "access_token": "eyJhbGciOiJSUzI1NiIs...你的accessToken...",
+      "domain": "www.codebuddy.cn"
+    },
+    {
+      "name": "账号2",
+      "access_token": "eyJhbGciOiJSUzI1NiIs...你的accessToken...",
+      "domain": "www.codebuddy.cn"
+    }
+  ]
+}
